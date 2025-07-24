@@ -1,4 +1,5 @@
 from datetime import timedelta
+import json
 import random
 import socket
 from struct import pack, unpack
@@ -23,9 +24,8 @@ qclass = 1
 # Use google as default dns
 default_dns = "8.8.8.8"
 
+
 # Define handlers for specific record types
-
-
 def a_handler(res, offset):
     return "".join(str(x) + "." for x in res[offset : offset + 4]).rstrip(".")
 
@@ -52,7 +52,15 @@ def soa_handler(res, offset):
     expire, offset = decode_as_4_bytes(res, offset)
     minimum, offset = decode_as_4_bytes(res, offset)
 
-    return mname, rname, serial, refresh, retry, expire, minimum
+    return {
+        "MNAME": mname,
+        "RNAME": rname,
+        "SERIAL": serial,
+        "REFRESH": refresh,
+        "RETRY": retry,
+        "EXPIRE": expire,
+        "MINIMUM": minimum,
+    }
 
 
 record_handlers = {
@@ -78,41 +86,35 @@ def dns_query(domain, qtype, dns_serv=default_dns):
         + pack(">H", qclass)
     )
 
+    resp = {}
+
     data = send_and_receive(dns_query, dns_serv)
 
-    transaction_id, flags_code, qd_count, an_count, ns_count, ar_count, offset = (
-        decode_header(data)
-    )
-    domain, offset = decode_domain(data, offset)
-    q_type, offset = decode_as_2_bytes(data, offset)
-    q_class, offset = decode_as_2_bytes(data, offset)
-    a_name, offset = decode_domain(data, offset)
-    a_type, offset = decode_as_2_bytes(data, offset)
-    a_class, offset = decode_as_2_bytes(data, offset)
-    ttl, offset = decode_as_4_bytes(data, offset)
-    rd_length, offset = decode_as_2_bytes(data, offset)
-    ttl_str = str(timedelta(seconds=ttl))
+    resp["header"], offset = decode_header(data)
 
-    print(
-        an_count,
-        q_type,
-        q_class,
-        domain,
-        a_name,
-        a_type,
-        a_class,
-        ttl_str,
-        rd_length,
-        record_handlers[a_type](data, offset),
-    )
+    # Decode question
+    resp["question_domain"], offset = decode_domain(data, offset)
+    resp["question_type"], offset = decode_as_2_bytes(data, offset)
+    resp["question_class"], offset = decode_as_2_bytes(data, offset)
+
+    # Decode answer
+    resp["answer_domain"], offset = decode_domain(data, offset)
+    resp["answer_type"], offset = decode_as_2_bytes(data, offset)
+    resp["answer_class"], offset = decode_as_2_bytes(data, offset)
+    resp["answer_ttl"], offset = decode_as_4_bytes(data, offset)
+    resp["resp_length"], offset = decode_as_2_bytes(data, offset)
+    resp["answer_ttl_str"] = str(timedelta(seconds=resp["answer_ttl"]))
+    resp["answer_body"] = record_handlers[resp["answer_type"]](data, offset)
+
+    return json.dumps(resp)
 
 
 def send_and_receive(dns_query, dns_serv):
-    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    sock.connect((dns_serv, 53))
-    sock.sendall(pack(">H", len(dns_query)))
-    sock.sendall(dns_query)
-    return receive_response_from_dns(sock)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.connect((dns_serv, 53))
+        sock.sendall(pack(">H", len(dns_query)))
+        sock.sendall(dns_query)
+        return receive_response_from_dns(sock)
 
 
 def receive_response_from_dns(socket):
@@ -156,7 +158,15 @@ def decode_header(res) -> tuple[int, int, int, int, int, int, int]:
     transaction_id, flags_code, qd_count, an_count, ns_count, ar_count = unpack(
         ">HHHHHH", res[:12]
     )
-    return (transaction_id, flags_code, qd_count, an_count, ns_count, ar_count, 12)
+
+    return {
+        "transaction_id": transaction_id,
+        "flags_code": flags_code,
+        "qd_count": qd_count,
+        "an_count": an_count,
+        "ns_count": ns_count,
+        "ar_count": ar_count,
+    }, 12
 
 
 def encode_domain(domain):
@@ -204,14 +214,18 @@ def decode_as_4_bytes(res, offset):
 
 def main():
     try:
-        dns_query("www.gynvael.coldwind.pl", "A", default_dns)
+        sys.stdout.write(dns_query("www.gynvael.coldwind.pl", "MX", default_dns))
     except socket.error as sock_err:
         sys.stderr.write(
-            "error: cannot connect, write or receive from server (%s):53 -> (%s)",
-            default_dns,
-            sock_err,
+            f"error: cannot connect, write or receive from server ({default_dns}):53 -> ({sock_err})\n"
         )
         sys.exit(1)
+    except Exception as e:
+        import traceback
+        sys.stderr.write(f"Type: {type(e).__name__}\n")
+        sys.stderr.write(f"Message: {e}\n")
+        sys.stderr.write("Traceback:\n")
+        traceback.print_exc()
 
 
 if __name__ == "__main__":
