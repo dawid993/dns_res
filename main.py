@@ -26,25 +26,29 @@ default_dns = "8.8.8.8"
 
 
 # Define handlers for specific record types
+
+# Returns
+# IP Address: 4 bytes
+#
+# + offset 
 def a_handler(res, offset):
-    return "".join(str(x) + "." for x in res[offset : offset + 4]).rstrip(".")
+    return "".join(str(x) + "." for x in res[offset : offset + 4]).rstrip("."), offset + 4
 
 # MX record is 2 bytes for priority
 # Rest of response is domain
-def mx_handler(res, offset, an_count = 0):
-    answers = []
-    for _ in range(an_count):
-        prority = unpack(">H", res[offset: offset + 2])
-        domain, offset = decode_domain(res, offset + 2)
-        
-        answers.append({
-            "PRIORITY": prority,
-            "MX_SERVER": domain
-        })
-        
-        # For now we skip  Name, Type, Class, TTL, RDLENGTH - 12 bytes in total
-        offset += 12
-    return answers     
+# Returns
+# PRIORITY: 2 bytes
+# DOMAIN: <domain_format>
+#
+# + offset
+def mx_handler(res, offset):
+    prority = unpack(">H", res[offset: offset + 2])
+    domain, offset = decode_domain(res, offset + 2)
+    
+    return {
+        "PRIORITY": prority,
+        "MX_SERVER": domain
+    }, offset    
 
 
 # Returns
@@ -55,6 +59,8 @@ def mx_handler(res, offset, an_count = 0):
 # Retry: 4 bytes
 # Expire: 4 bytes
 # Minimum TTL: 4 bytes
+#
+# + offset
 def soa_handler(res, offset):
     mname, offset = decode_domain(res, offset)
     rname, offset = decode_domain(res, offset)
@@ -72,7 +78,7 @@ def soa_handler(res, offset):
         "RETRY": retry,
         "EXPIRE": expire,
         "MINIMUM": minimum,
-    }
+    }, offset
 
 
 record_handlers = {
@@ -109,16 +115,23 @@ def dns_query(domain, qtype, dns_serv=default_dns):
     resp["question_type"], offset = decode_as_2_bytes(data, offset)
     resp["question_class"], offset = decode_as_2_bytes(data, offset)
 
-    # Decode answer
-    resp["answer_domain"], offset = decode_domain(data, offset)
-    resp["answer_type"], offset = decode_as_2_bytes(data, offset)
-    resp["answer_class"], offset = decode_as_2_bytes(data, offset)
-    resp["answer_ttl"], offset = decode_as_4_bytes(data, offset)
-    resp["resp_length"], offset = decode_as_2_bytes(data, offset)
-    resp["answer_ttl_str"] = str(timedelta(seconds=resp["answer_ttl"]))
+    answer_count = resp['header']['an_count']
+    answers = []
+    for _ in range(answer_count):
+        answer = {}
+        # Decode answer
+        answer["answer_domain"], offset = decode_domain(data, offset)
+        answer["answer_type"], offset = decode_as_2_bytes(data, offset)
+        answer["answer_class"], offset = decode_as_2_bytes(data, offset)
+        answer["answer_ttl"], offset = decode_as_4_bytes(data, offset)
+        answer["resp_length"], offset = decode_as_2_bytes(data, offset)
+        answer["answer_ttl_str"] = str(timedelta(seconds=answer["answer_ttl"]))
+        answer["answer_body"], offset = record_handlers[answer["answer_type"]](data, offset)
 
-    resp["answer_body"] = record_handlers[resp["answer_type"]](data, offset, resp['header']['an_count'])
-
+        answers.append(answer)
+    
+    resp["answers"] = answers
+        
     return json.dumps(resp)
 
 
@@ -227,7 +240,7 @@ def decode_as_4_bytes(res, offset):
 
 def main():
     try:
-        sys.stdout.write(dns_query("gmail.com", "MX", default_dns))
+        sys.stdout.write(dns_query("wp.pl", "MX", default_dns))
     except socket.error as sock_err:
         sys.stderr.write(
             f"error: cannot connect, write or receive from server ({default_dns}):53 -> ({sock_err})\n"
