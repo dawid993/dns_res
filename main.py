@@ -11,7 +11,7 @@ record_types = {
     "CNAME": 5,
     "SOA": 6,
     # "WKS": 11,
-    # "PTR": 12,
+    "PTR": 12,
     # "HINFO": 13,
     # "MINFO": 14,
     "MX": 15,
@@ -27,12 +27,17 @@ default_dns = "8.8.8.8"
 
 # Define handlers for specific record types
 
+
 # Returns
 # IP Address: 4 bytes
 #
-# + offset 
+# + offset
 def a_handler(res, offset):
-    return "".join(str(x) + "." for x in res[offset : offset + 4]).rstrip("."), offset + 4
+    return (
+        "".join(str(x) + "." for x in res[offset : offset + 4]).rstrip("."),
+        offset + 4,
+    )
+
 
 # MX record is 2 bytes for priority
 # Rest of response is domain
@@ -42,13 +47,10 @@ def a_handler(res, offset):
 #
 # + offset
 def mx_handler(res, offset):
-    prority = unpack(">H", res[offset: offset + 2])
+    prority = unpack(">H", res[offset : offset + 2])[0]
     domain, offset = decode_domain(res, offset + 2)
-    
-    return {
-        "PRIORITY": prority,
-        "MX_SERVER": domain
-    }, offset    
+
+    return {"PRIORITY": prority, "MX_SERVER": domain}, offset
 
 
 # Returns
@@ -79,12 +81,17 @@ def soa_handler(res, offset):
         "EXPIRE": expire,
         "MINIMUM": minimum,
     }, offset
+    
+def ptr_handler(res, offset):
+    ptr_domain, offset = decode_domain(res, offset)
+    return ptr_domain, offset
 
 
 record_handlers = {
     record_types["A"]: a_handler,
     record_types["SOA"]: soa_handler,
     record_types["MX"]: mx_handler,
+    record_types["PTR"]: ptr_handler,    
 }
 
 
@@ -95,8 +102,15 @@ def validate_request_data(domain, qtype):
         raise ValueError(f"{qtype} is unsupported dns record type")
 
 
-def dns_query(domain, qtype, dns_serv=default_dns):
-    validate_request_data(domain, qtype)
+# First parameter is called subject because it can be domain 
+# or ip in case of PTR request
+def dns_query(subject, qtype, dns_serv=default_dns):
+    validate_request_data(subject, qtype)
+    if qtype == 'PTR':
+        domain = get_arpa_domain(subject)
+    else:
+        domain = subject
+        
     dns_query = (
         encode_header()
         + b"".join(encode_domain(domain))
@@ -115,7 +129,7 @@ def dns_query(domain, qtype, dns_serv=default_dns):
     resp["question_type"], offset = decode_as_2_bytes(data, offset)
     resp["question_class"], offset = decode_as_2_bytes(data, offset)
 
-    answer_count = resp['header']['an_count']
+    answer_count = resp["header"]["an_count"]
     answers = []
     for _ in range(answer_count):
         answer = {}
@@ -126,12 +140,14 @@ def dns_query(domain, qtype, dns_serv=default_dns):
         answer["answer_ttl"], offset = decode_as_4_bytes(data, offset)
         answer["resp_length"], offset = decode_as_2_bytes(data, offset)
         answer["answer_ttl_str"] = str(timedelta(seconds=answer["answer_ttl"]))
-        answer["answer_body"], offset = record_handlers[answer["answer_type"]](data, offset)
+        answer["answer_body"], offset = record_handlers[answer["answer_type"]](
+            data, offset
+        )
 
         answers.append(answer)
-    
+
     resp["answers"] = answers
-        
+
     return json.dumps(resp)
 
 
@@ -140,12 +156,8 @@ def send_and_receive(dns_query, dns_serv):
         sock.connect((dns_serv, 53))
         sock.sendall(pack(">H", len(dns_query)))
         sock.sendall(dns_query)
-        return receive_response_from_dns(sock)
-
-
-def receive_response_from_dns(socket):
-    data_len = unpack(">H", socket.recv(2))[0]
-    return socket.recv(data_len)
+        data_len = unpack(">H", sock.recv(2))[0]
+        return sock.recv(data_len)
 
 
 def encode_header():
@@ -194,6 +206,8 @@ def decode_header(res) -> tuple[int, int, int, int, int, int, int]:
         "ar_count": ar_count,
     }, 12
 
+def get_arpa_domain(ip):
+    return '.'.join(ip.split('.')[::-1]) + '.in-addr.arpa'
 
 def encode_domain(domain):
     encoded_domain = []
@@ -240,7 +254,7 @@ def decode_as_4_bytes(res, offset):
 
 def main():
     try:
-        sys.stdout.write(dns_query("wp.pl", "MX", default_dns))
+        sys.stdout.write(dns_query("212.77.98.9", "PTR", default_dns))
     except socket.error as sock_err:
         sys.stderr.write(
             f"error: cannot connect, write or receive from server ({default_dns}):53 -> ({sock_err})\n"
@@ -248,6 +262,7 @@ def main():
         sys.exit(1)
     except Exception as e:
         import traceback
+
         sys.stderr.write(f"Type: {type(e).__name__}\n")
         sys.stderr.write(f"Message: {e}\n")
         sys.stderr.write("Traceback:\n")
