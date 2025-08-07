@@ -81,17 +81,24 @@ def soa_handler(res, offset):
         "EXPIRE": expire,
         "MINIMUM": minimum,
     }, offset
-    
+
+
 def ptr_handler(res, offset):
     ptr_domain, offset = decode_domain(res, offset)
     return ptr_domain, offset
+
+
+def cname_handler(res, offset):
+    domain, offset = decode_domain(res, offset)
+    return domain, offset
 
 
 record_handlers = {
     record_types["A"]: a_handler,
     record_types["SOA"]: soa_handler,
     record_types["MX"]: mx_handler,
-    record_types["PTR"]: ptr_handler,    
+    record_types["PTR"]: ptr_handler,
+    record_types["CNAME"]: cname_handler,
 }
 
 
@@ -102,15 +109,15 @@ def validate_request_data(domain, qtype):
         raise ValueError(f"{qtype} is unsupported dns record type")
 
 
-# First parameter is called subject because it can be domain 
+# First parameter is called subject because it can be domain
 # or ip in case of PTR request
 def dns_query(subject, qtype, dns_serv=default_dns):
     validate_request_data(subject, qtype)
-    if qtype == 'PTR':
+    if qtype == "PTR":
         domain = get_arpa_domain(subject)
     else:
         domain = subject
-        
+
     dns_query = (
         encode_header()
         + b"".join(encode_domain(domain))
@@ -129,26 +136,33 @@ def dns_query(subject, qtype, dns_serv=default_dns):
     resp["question_type"], offset = decode_as_2_bytes(data, offset)
     resp["question_class"], offset = decode_as_2_bytes(data, offset)
 
-    answer_count = resp["header"]["an_count"]
+    resp["answers"], offset = read_answers(resp["header"]["an_count"], data, offset)
+    resp["ns_answers"], offset = read_answers(resp["header"]["ns_count"], data, offset)
+    resp["ar_answers"], offset = read_answers(resp["header"]["ar_count"], data, offset)
+
+    return json.dumps(resp)
+
+
+def read_answers(answers_count, data, offset):
+    rev_record_types = {v: k for k, v in record_types.items()}
     answers = []
-    for _ in range(answer_count):
+    for _ in range(answers_count):
         answer = {}
         # Decode answer
         answer["answer_domain"], offset = decode_domain(data, offset)
-        answer["answer_type"], offset = decode_as_2_bytes(data, offset)
+        answer_type, offset = decode_as_2_bytes(data, offset)
+        answer["answer_type"] = rev_record_types[answer_type]
         answer["answer_class"], offset = decode_as_2_bytes(data, offset)
         answer["answer_ttl"], offset = decode_as_4_bytes(data, offset)
         answer["resp_length"], offset = decode_as_2_bytes(data, offset)
         answer["answer_ttl_str"] = str(timedelta(seconds=answer["answer_ttl"]))
-        answer["answer_body"], offset = record_handlers[answer["answer_type"]](
+        answer["answer_body"], offset = record_handlers[answer_type](
             data, offset
         )
 
         answers.append(answer)
 
-    resp["answers"] = answers
-
-    return json.dumps(resp)
+    return answers, offset
 
 
 def send_and_receive(dns_query, dns_serv):
@@ -206,8 +220,10 @@ def decode_header(res) -> tuple[int, int, int, int, int, int, int]:
         "ar_count": ar_count,
     }, 12
 
+
 def get_arpa_domain(ip):
-    return '.'.join(ip.split('.')[::-1]) + '.in-addr.arpa'
+    return ".".join(ip.split(".")[::-1]) + ".in-addr.arpa"
+
 
 def encode_domain(domain):
     encoded_domain = []
@@ -254,7 +270,7 @@ def decode_as_4_bytes(res, offset):
 
 def main():
     try:
-        sys.stdout.write(dns_query("212.77.98.9", "PTR", default_dns))
+        sys.stdout.write(dns_query("wp.pl", "CNAME", default_dns))
     except socket.error as sock_err:
         sys.stderr.write(
             f"error: cannot connect, write or receive from server ({default_dns}):53 -> ({sock_err})\n"
